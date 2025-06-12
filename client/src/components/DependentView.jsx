@@ -715,7 +715,7 @@ export function DependentView() {
           </div>
         )}
 
-        <h1 style={{ margin: '0 0 20px 0' }}>Панель подопечного</h1>
+        <h1 style={{ margin: '0 0 20px 0' }}>Ваши задачи</h1>
 
         <section style={{ 
           backgroundColor: '#e3f2fd',

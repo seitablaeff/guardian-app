@@ -909,23 +909,7 @@ export function GuardianView() {
           </div>
         )}
 
-        <section style={{ 
-          display: 'flex', 
-          justifyContent: 'space-between', 
-          alignItems: 'center', 
-          marginBottom: '2rem',
-          backgroundColor: '#ffffff',
-          padding: '20px',
-          borderRadius: '12px',
-          boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
-        }}>
-          <h2 style={{ 
-            margin: 0,
-            fontSize: '24px',
-            color: '#2c3e50',
-            fontWeight: '600'
-          }}>Добро пожаловать, {userName}!</h2>
-        </section>
+        <h1 style={{ margin: '0 0 20px 0' }}>Добро пожаловать, {userName}!</h1>
 
         <section style={{ 
           marginBottom: '30px',
