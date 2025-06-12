@@ -5,6 +5,25 @@ import { saveTask, getTasks, savePendingChange, getPendingChanges, clearPendingC
 import { FaCheck, FaTimes, FaBell, FaHome, FaClipboardList, FaExclamationCircle } from 'react-icons/fa';
 import { MdDescription, MdDateRange, MdAccessTime, MdPending } from 'react-icons/md';
 
+// Добавляем стили для анимации
+const styles = `
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+      transform: translateY(-10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+`;
+
+// Вставляем стили в head
+const styleSheet = document.createElement("style");
+styleSheet.innerText = styles;
+document.head.appendChild(styleSheet);
+
 export function DependentView() {
   const [tasks, setTasks] = useState([]);
   const [error, setError] = useState(null);
@@ -16,6 +35,7 @@ export function DependentView() {
   const [wsError, setWsError] = useState(null);
   const [ws, setWs] = useState(null);
   const [notifications, setNotifications] = useState([]);
+  const [showCode, setShowCode] = useState(false);
 
   const fetchTasks = async () => {
     try {
@@ -724,35 +744,66 @@ export function DependentView() {
           marginBottom: '20px',
           border: '1px solid #bbdefb'
         }}>
-          <h2 style={{ 
-            margin: '0 0 10px 0',
-            color: '#0d47a1',
-            fontSize: '16px',
-            fontWeight: '600'
-          }}>
-            Покажите этот код для подключения к опекуну
-          </h2>
           <div 
             role="button"
             tabIndex="0"
-            onKeyPress={(e) => handleKeyPress(e, () => {})}
+            onClick={() => setShowCode(!showCode)}
+            onKeyPress={(e) => handleKeyPress(e, () => setShowCode(!showCode))}
             style={{ 
-              backgroundColor: '#ffffff',
-              padding: '20px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px',
+              cursor: 'pointer',
+              padding: '10px',
               borderRadius: '8px',
-              border: '1px solid #bbdefb',
-              fontSize: '32px',
-              fontWeight: '600',
-              color: '#0d47a1',
-              textAlign: 'center',
-              letterSpacing: '3px',
-              minHeight: '48px',
-              minWidth: '48px',
-              cursor: 'pointer'
+              transition: 'background-color 0.2s',
+              ':hover': {
+                backgroundColor: '#bbdefb'
+              }
             }}
+            title="Нажмите, чтобы показать или скрыть код подключения"
           >
-            {userCode || 'Загрузка...'}
+            <FaHome style={{ fontSize: '24px', color: '#0d47a1' }} />
+            <h2 style={{ 
+              margin: 0,
+              color: '#0d47a1',
+              fontSize: '16px',
+              fontWeight: '600'
+            }}>
+              {showCode ? 'Скрыть код подключения' : 'Показать код подключения'}
+            </h2>
           </div>
+          
+          {showCode && (
+            <div 
+              style={{ 
+                marginTop: '15px',
+                animation: 'fadeIn 0.3s ease-in-out'
+              }}
+            >
+              <div 
+                role="button"
+                tabIndex="0"
+                onKeyPress={(e) => handleKeyPress(e, () => {})}
+                style={{ 
+                  backgroundColor: '#ffffff',
+                  padding: '20px',
+                  borderRadius: '8px',
+                  border: '1px solid #bbdefb',
+                  fontSize: '32px',
+                  fontWeight: '600',
+                  color: '#0d47a1',
+                  textAlign: 'center',
+                  letterSpacing: '3px',
+                  minHeight: '48px',
+                  minWidth: '48px',
+                  cursor: 'pointer'
+                }}
+              >
+                {userCode || 'Загрузка...'}
+              </div>
+            </div>
+          )}
         </section>
 
         {!isOnline && (
