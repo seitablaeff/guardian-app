@@ -37,6 +37,33 @@ export function DependentView() {
   const [notifications, setNotifications] = useState([]);
   const [showCode, setShowCode] = useState(false);
 
+  // const sendTestNotification = async () => {
+  //   try {
+  //     if (!('Notification' in window)) {
+  //       setError('Браузер не поддерживает уведомления');
+  //       return;
+  //     }
+
+  //     if (Notification.permission !== 'granted') {
+  //       const permission = await Notification.requestPermission();
+  //       if (permission !== 'granted') {
+  //         setError('Разрешение на уведомления не получено');
+  //         return;
+  //       }
+  //     }
+
+  //     const notification = new Notification('Тестовое уведомление', {
+  //       body: 'Это тестовое уведомление для проверки работы системы',
+  //       icon: '/favicon.ico'
+  //     });
+
+  //     console.log('Тестовое уведомление отправлено');
+  //   } catch (error) {
+  //     console.error('Ошибка при отправке тестового уведомления:', error);
+  //     setError('Ошибка при отправке тестового уведомления');
+  //   }
+  // };
+
   const fetchTasks = async () => {
     try {
       // Всегда сначала получаем данные из локального хранилища
@@ -205,108 +232,80 @@ export function DependentView() {
     }
   }, []);
 
-  // Функция для проверки приближающихся задач
-  const checkUpcomingTasks = () => {
-    console.log('[Notification Check] Запуск проверки в', new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }));
-    console.log('Активные задачи:', tasks.filter(t => t.status !== 'completed'));
-    
-    if (document.visibilityState !== 'visible') {
-      console.log('Вкладка неактивна, пропускаем проверку');
-      return;
-    }
+  // Функция для проверки и отправки уведомлений
+  const checkNotifications = () => {
+    const now = new Date();
+    console.log('Проверка уведомлений:', now.toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }));
 
     tasks.forEach(task => {
       try {
-        console.log(`Проверка задачи: ${task.title} [${task.status}]`);
-        
-        if (!task.date || !task.time) {
-          console.log('Пропуск задачи: отсутствует дата или время');
+        if (!task.date || !task.time || task.status === 'completed') {
+          console.log('Пропуск задачи:', task.title, '- отсутствует дата/время или задача завершена');
           return;
         }
 
-        // Создаем объект даты для задачи в локальном времени
+        // Создаем объект даты для задачи
         const [hours, minutes] = task.time.split(':').map(Number);
         const taskDate = new Date(task.date);
         taskDate.setHours(hours, minutes, 0, 0);
-        
+
+        console.log('Проверка задачи:', task.title);
         console.log('Время задачи:', taskDate.toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }));
-        
-        const now = new Date();
         console.log('Текущее время:', now.toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }));
-        
+
+        // Проверяем, наступило ли время задачи
         const timeDiff = taskDate - now;
         console.log('Разница во времени (минуты):', Math.floor(timeDiff / (1000 * 60)));
-        
-        // Проверяем, не отправляли ли мы уже уведомление
-        const lastNotified = localStorage.getItem(`lastNotified_${task.id}`);
-        if (lastNotified) {
-          const lastNotifiedTime = new Date(parseInt(lastNotified));
-          const timeSinceLastNotification = now - lastNotifiedTime;
-          console.log('Последнее уведомление было отправлено:', 
-            lastNotifiedTime.toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }));
-          console.log('Прошло времени с последнего уведомления (минуты):', 
-            Math.floor(timeSinceLastNotification / (1000 * 60)));
 
-          // Если уведомление было отправлено менее 25 минут назад, пропускаем
-          if (timeSinceLastNotification < 25 * 60 * 1000) {
-            console.log('Пропуск уведомления: уже отправляли менее 25 минут назад');
-            return;
+        if (timeDiff <= 0 && timeDiff > -60 * 1000) { // Если время наступило, но не более минуты назад
+          // Проверяем, не отправляли ли мы уже уведомление
+          const lastNotified = localStorage.getItem(`lastNotified_${task.id}`);
+          if (lastNotified) {
+            const lastNotifiedTime = new Date(parseInt(lastNotified));
+            console.log('Последнее уведомление было отправлено:', 
+              lastNotifiedTime.toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }));
+            
+            // Если уведомление было отправлено менее 1 минуты назад, пропускаем
+            if (now - lastNotifiedTime < 60 * 1000) {
+              console.log('Пропуск уведомления: уже отправляли менее 1 минуты назад');
+              return;
+            }
           }
-        }
 
-        // Проверяем, наступило ли время задачи (с точностью до 30 секунд)
-        const isTaskTime = Math.abs(timeDiff) <= 30 * 1000; // 30 секунд
-        
-        if (isTaskTime) {
           console.log('Отправка уведомления для задачи:', task.title);
-          
-          // Отправляем уведомление через WebSocket
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            const notification = {
-              type: 'task_reminder',
-              title: 'Время выполнить задачу',
-              body: `Наступило время для задачи:\n${task.title}\n${task.description ? `Описание: ${task.description}` : ''}\nВремя: ${task.time}`,
-              taskId: task.id,
-              timestamp: new Date().toISOString()
-            };
-            ws.send(JSON.stringify(notification));
-          }
-          
-          // Отправляем локальное уведомление
           sendNotification(
-            'Время выполнить задачу',
-            `Наступило время для задачи:\n${task.title}\n${task.description ? `Описание: ${task.description}` : ''}\nВремя: ${task.time}`
+            task.title,
+            `${task.description || 'Нет описания'}\nВремя: ${task.time}`
           );
 
           // Сохраняем время последнего уведомления
           localStorage.setItem(`lastNotified_${task.id}`, Date.now().toString());
+          console.log('Уведомление отправлено и сохранено');
         } else {
           console.log('Задача не требует уведомления:', 
-            timeDiff < 0 ? 'время уже прошло' : 'время еще не наступило');
+            timeDiff > 0 ? 'время еще не наступило' : 'время прошло более минуты назад');
         }
       } catch (error) {
-        console.error('Ошибка при проверке задачи:', error);
+        console.error('Ошибка при проверке уведомлений:', error);
       }
     });
   };
 
-  // Обновляем интервал проверки задач
+  // Запускаем проверку уведомлений каждые 10 секунд
   useEffect(() => {
-    const intervalId = setInterval(() => {
-      if (tasks.length > 0) {
-        console.log('Запуск проверки задач по таймеру');
-        checkUpcomingTasks();
-      }
-    }, 15000); // Проверка каждые 15 секунд для большей точности
-    
-    // Запускаем проверку сразу при монтировании компонента
-    if (tasks.length > 0) {
-      console.log('Первоначальная проверка задач');
-      checkUpcomingTasks();
-    }
-    
-    return () => clearInterval(intervalId);
-  }, [tasks]); // Добавляем tasks в зависимости
+    console.log('Запуск системы уведомлений');
+    // Первоначальная проверка
+    checkNotifications();
+
+    // Устанавливаем интервал
+    const intervalId = setInterval(checkNotifications, 10000);
+
+    // Очистка при размонтировании
+    return () => {
+      console.log('Остановка системы уведомлений');
+      clearInterval(intervalId);
+    };
+  }, [tasks]); // Зависимость от tasks, чтобы перезапускать при изменении списка задач
 
   // Добавляем WebSocket соединение
   useEffect(() => {
@@ -744,35 +743,60 @@ export function DependentView() {
           marginBottom: '20px',
           border: '1px solid #bbdefb'
         }}>
-          <div 
-            role="button"
-            tabIndex="0"
-            onClick={() => setShowCode(!showCode)}
-            onKeyPress={(e) => handleKeyPress(e, () => setShowCode(!showCode))}
-            style={{ 
-              display: 'flex',
-              alignItems: 'center',
-              gap: '10px',
-              cursor: 'pointer',
-              padding: '10px',
-              borderRadius: '8px',
-              transition: 'background-color 0.2s',
-              ':hover': {
-                backgroundColor: '#bbdefb'
-              }
-            }}
-            title="Нажмите, чтобы показать или скрыть код подключения"
-          >
-            <FaHome style={{ fontSize: '24px', color: '#0d47a1' }} />
-            <h2 style={{ 
-              margin: 0,
-              color: '#0d47a1',
-              fontSize: '16px',
-              fontWeight: '600'
-            }}>
-              {showCode ? 'Скрыть код подключения' : 'Показать код подключения'}
-            </h2>
-          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
+            <div 
+              role="button"
+              tabIndex="0"
+              onClick={() => setShowCode(!showCode)}
+              onKeyPress={(e) => handleKeyPress(e, () => setShowCode(!showCode))}
+              style={{ 
+                display: 'flex',
+                alignItems: 'center',
+                gap: '10px',
+                cursor: 'pointer',
+                padding: '10px',
+                borderRadius: '8px',
+                transition: 'background-color 0.2s',
+                ':hover': {
+                  backgroundColor: '#bbdefb'
+                }
+              }}
+              title="Нажмите, чтобы показать или скрыть код подключения"
+            >
+              <FaHome style={{ fontSize: '24px', color: '#0d47a1' }} />
+              <h2 style={{ 
+                margin: 0,
+                color: '#0d47a1',
+                fontSize: '16px',
+                fontWeight: '600'
+              }}>
+                {showCode ? 'Скрыть код подключения' : 'Показать код подключения'}
+              </h2>
+            </div>
+            {/*
+              Это отладочная кнопка для проверки уведомлений
+            */}</div>
+            {/* <button
+              onClick={sendTestNotification}
+              style={{
+                padding: '10px 20px',
+                backgroundColor: '#4CAF50',
+                color: 'white',
+                border: 'none',
+                borderRadius: '8px',
+                cursor: 'pointer',
+                fontSize: '14px',
+                fontWeight: '600',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                transition: 'background-color 0.2s'
+              }}
+            >
+              <FaBell />
+              Тест уведомлений
+            </button>
+          </div> */}
           
           {showCode && (
             <div 
