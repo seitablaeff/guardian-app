@@ -1,8 +1,8 @@
 // components/GuardianView.jsx
-import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import React, { useEffect, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import { API_URL } from '../config';
-import { saveTask, getTasks, savePendingChange, getPendingChanges, clearPendingChanges } from '../utils/db';
+import { saveTask, getTasks, savePendingChange, getPendingChanges, clearPendingChanges, deleteTask } from '../utils/db';
 import { FaCheck, FaTimes, FaTrash, FaBell, FaHome, FaUserPlus, FaPlus } from 'react-icons/fa';
 import { MdDescription, MdDateRange, MdAccessTime, MdPending } from 'react-icons/md';
 
@@ -13,8 +13,8 @@ export function GuardianView() {
     title: '', 
     dependentId: '',
     description: '',
-    date: '',
-    time: ''
+    date: new Date().toISOString().split('T')[0],
+    time: new Date().toTimeString().slice(0, 5)
   });
   const [linkCode, setLinkCode] = useState('');
   const [error, setError] = useState(null);
@@ -22,46 +22,15 @@ export function GuardianView() {
   const [loading, setLoading] = useState(true);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [pendingTasks, setPendingTasks] = useState([]);
+  const [wsError, setWsError] = useState(null);
+  const [ws, setWs] = useState(null);
+  const [dependentCode, setDependentCode] = useState('');
+  const navigate = useNavigate();
+  const token = localStorage.getItem('token');
 
   const fetchTasks = async () => {
     try {
-      const token = localStorage.getItem('token');
       console.log('Запрос списка задач');
-      
-      if (!navigator.onLine) {
-        // Если офлайн, получаем задачи из IndexedDB
-        const offlineTasks = await getTasks();
-        console.log('Получены задачи из IndexedDB:', offlineTasks);
-        
-        if (Array.isArray(offlineTasks) && offlineTasks.length > 0) {
-          const tasksByDependent = offlineTasks.reduce((acc, task) => {
-            if (!acc[task.dependent_id]) {
-              acc[task.dependent_id] = [];
-            }
-            acc[task.dependent_id].push(task);
-            return acc;
-          }, {});
-          setTasks(tasksByDependent);
-        } else {
-          // Если в IndexedDB нет задач, пробуем получить из localStorage
-          const cachedTasks = localStorage.getItem('tasks');
-          if (cachedTasks) {
-            const tasks = JSON.parse(cachedTasks);
-            const tasksByDependent = tasks.reduce((acc, task) => {
-              if (!acc[task.dependent_id]) {
-                acc[task.dependent_id] = [];
-              }
-              acc[task.dependent_id].push(task);
-              return acc;
-            }, {});
-            setTasks(tasksByDependent);
-          } else {
-            setTasks({});
-          }
-        }
-        return;
-      }
-
       const response = await fetch(`${API_URL}/api/tasks/guardian`, {
         headers: {
           'Authorization': `Bearer ${token}`
@@ -72,82 +41,32 @@ export function GuardianView() {
         throw new Error('Ошибка при получении задач');
       }
 
-      const data = await response.json();
-      
-      if (Array.isArray(data)) {
-        // Сохраняем задачи в IndexedDB
-        await Promise.all(data.map(task => saveTask(task)));
-        // Сохраняем также в localStorage для офлайн-доступа
-        localStorage.setItem('tasks', JSON.stringify(data));
-        
-        const tasksByDependent = data.reduce((acc, task) => {
-          if (!acc[task.dependent_id]) {
-            acc[task.dependent_id] = [];
-          }
-          acc[task.dependent_id].push(task);
-          return acc;
-        }, {});
-        
-        // Сохраняем текущее состояние перед обновлением
-        setTasks(prevTasks => {
-          // Объединяем новые задачи с существующими
-          const mergedTasks = { ...prevTasks };
-          for (const dependentId in tasksByDependent) {
-            if (!mergedTasks[dependentId]) {
-              mergedTasks[dependentId] = [];
-            }
-            // Обновляем существующие задачи и добавляем новые
-            tasksByDependent[dependentId].forEach(newTask => {
-              const existingTaskIndex = mergedTasks[dependentId].findIndex(t => t.id === newTask.id);
-              if (existingTaskIndex >= 0) {
-                mergedTasks[dependentId][existingTaskIndex] = newTask;
-              } else {
-                mergedTasks[dependentId].push(newTask);
-              }
-            });
-          }
-          return mergedTasks;
-        });
+      const serverTasks = await response.json();
+      console.log('Получены задачи с сервера:', serverTasks);
+
+      // Сохраняем каждую задачу отдельно в IndexedDB
+      for (const task of serverTasks) {
+        await saveTask(task);
       }
+
+      // Группируем задачи по подопечным
+      const groupedTasks = {};
+      serverTasks.forEach(task => {
+        if (!groupedTasks[task.dependent_id]) {
+          groupedTasks[task.dependent_id] = [];
+        }
+        groupedTasks[task.dependent_id].push(task);
+      });
+
+      setTasks(groupedTasks);
     } catch (error) {
       console.error('Ошибка при получении задач:', error);
-      // При ошибке пытаемся получить задачи из IndexedDB
-      const offlineTasks = await getTasks();
-      console.log('Получены задачи из IndexedDB после ошибки:', offlineTasks);
-      
-      if (Array.isArray(offlineTasks) && offlineTasks.length > 0) {
-        const tasksByDependent = offlineTasks.reduce((acc, task) => {
-          if (!acc[task.dependent_id]) {
-            acc[task.dependent_id] = [];
-          }
-          acc[task.dependent_id].push(task);
-          return acc;
-        }, {});
-        setTasks(tasksByDependent);
-      } else {
-        // Если в IndexedDB нет задач, пробуем получить из localStorage
-        const cachedTasks = localStorage.getItem('tasks');
-        if (cachedTasks) {
-          const tasks = JSON.parse(cachedTasks);
-          const tasksByDependent = tasks.reduce((acc, task) => {
-            if (!acc[task.dependent_id]) {
-              acc[task.dependent_id] = [];
-            }
-            acc[task.dependent_id].push(task);
-            return acc;
-          }, {});
-          setTasks(tasksByDependent);
-        } else {
-          setTasks({});
-        }
-      }
-      setError(error.message);
+      setError('Не удалось загрузить задачи');
     }
   };
 
   const fetchDependents = async () => {
     try {
-      const token = localStorage.getItem('token');
       console.log('Запрос списка подопечных');
       
       // Если офлайн, используем данные из localStorage
@@ -201,7 +120,6 @@ export function GuardianView() {
 
   const fetchUserInfo = async () => {
     try {
-      const token = localStorage.getItem('token');
       if (!token) {
         console.error('Токен не найден');
         setError('Требуется авторизация');
@@ -265,7 +183,6 @@ export function GuardianView() {
     
     for (const task of pendingTasks) {
       try {
-        const token = localStorage.getItem('token');
         const response = await fetch(`${API_URL}/api/tasks`, {
           method: 'POST',
           headers: {
@@ -316,28 +233,52 @@ export function GuardianView() {
     };
   }, [pendingTasks]);
 
+  // Загружаем данные при монтировании компонента
   useEffect(() => {
-    const fetchData = async () => {
+    const loadInitialData = async () => {
       try {
+        setLoading(true);
+        // Загружаем информацию о пользователе
         await fetchUserInfo();
+        // Загружаем список подопечных
         await fetchDependents();
-        await fetchTasks();
+        
+        // Загружаем задачи из IndexedDB
+        const offlineTasks = await getTasks();
+        if (offlineTasks && offlineTasks.length > 0) {
+          console.log('Загружены задачи из IndexedDB:', offlineTasks);
+          const tasksByDependent = offlineTasks.reduce((acc, task) => {
+            if (!acc[task.dependent_id]) {
+              acc[task.dependent_id] = [];
+            }
+            acc[task.dependent_id].push(task);
+            return acc;
+          }, {});
+          setTasks(tasksByDependent);
+        }
+
+        // Затем обновляем с сервера, если есть соединение
+        if (isOnline) {
+          await fetchTasks();
+        }
       } catch (error) {
-        console.error('Ошибка при загрузке данных:', error);
+        console.error('Ошибка при загрузке начальных данных:', error);
         setError(error.message);
       } finally {
         setLoading(false);
       }
     };
 
-    fetchData();
+    loadInitialData();
+  }, [isOnline]);
 
-    // Устанавливаем интервал обновления задач каждые 5 секунд
-    const intervalId = setInterval(fetchTasks, 5000);
-
-    // Очищаем интервал при размонтировании компонента
-    return () => clearInterval(intervalId);
-  }, []);
+  // Устанавливаем интервал обновления задач
+  useEffect(() => {
+    if (isOnline) {
+      const intervalId = setInterval(fetchTasks, 5000);
+      return () => clearInterval(intervalId);
+    }
+  }, [isOnline]);
 
   const handleLinkDependent = async (e) => {
     e.preventDefault();
@@ -347,7 +288,6 @@ export function GuardianView() {
     }
 
     try {
-      const token = localStorage.getItem('token');
       console.log('Отправляем запрос на связывание с кодом:', linkCode);
       
       const response = await fetch(`${API_URL}/api/guardian/link`, {
@@ -382,158 +322,203 @@ export function GuardianView() {
 
   const handleCreateTask = async (e) => {
     e.preventDefault();
-    if (!newTask.title.trim()) {
-      setError('Введите название задачи');
+    if (!token) {
+      console.error('Токен не найден');
       return;
     }
 
-    if (navigator.onLine) {
-      try {
-        const token = localStorage.getItem('token');
-        const response = await fetch(`${API_URL}/api/tasks`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            title: newTask.title.trim(),
-            description: newTask.description.trim(),
-            date: newTask.date,
-            time: newTask.time,
-            dependentId: newTask.dependentId
-          })
+    const formData = new FormData(e.target);
+    const date = formData.get('date');
+    const time = formData.get('time');
+    
+    console.log('Полученные дата и время:', { date, time });
+    console.log('Все данные формы:', Object.fromEntries(formData.entries()));
+
+    if (!date || !time) {
+      setError('Пожалуйста, укажите дату и время');
+      return;
+    }
+
+    // Проверяем формат даты
+    const dateObj = new Date(`${date}T${time}`);
+    if (isNaN(dateObj.getTime())) {
+      setError('Неверный формат даты и времени');
+      return;
+    }
+    
+    console.log('Разобранные дата и время:', { date, time });
+    
+    const taskData = {
+      title: newTask.title,
+      description: newTask.description,
+      date: date,
+      time: time,
+      dependentId: formData.get('dependent_id'),
+      status: 'pending'
+    };
+
+    console.log('Подготовленные данные для отправки:', taskData);
+
+    try {
+      if (!isOnline) {
+        // В офлайн режиме создаем локальную задачу
+        const newTask = {
+          ...taskData,
+          id: Date.now().toString(),
+          created_at: new Date().toISOString(),
+          last_updated: new Date().toISOString()
+        };
+
+        // Сохраняем в IndexedDB
+        await saveTask(newTask);
+        await savePendingChange({
+          type: 'create',
+          task: newTask,
+          timestamp: Date.now()
         });
 
-        if (!response.ok) {
-          throw new Error('Ошибка при создании задачи');
-        }
-
-        const createdTask = await response.json();
-        console.log('Задача создана:', createdTask);
-
-        // Обновляем UI с новой задачей
+        // Обновляем состояние
         setTasks(prevTasks => {
-          const dependentTasks = prevTasks[newTask.dependentId] || [];
-          return {
-            ...prevTasks,
-            [newTask.dependentId]: [...dependentTasks, createdTask]
-          };
+          const updated = { ...prevTasks };
+          if (!updated[taskData.dependentId]) {
+            updated[taskData.dependentId] = [];
+          }
+          updated[taskData.dependentId] = [...updated[taskData.dependentId], newTask];
+          return updated;
         });
 
-        // Отправляем уведомление о создании задачи опекуну
-        const guardianNotification = {
-          title: 'Новая задача создана',
-          body: `Задача: ${createdTask.title}\n${createdTask.description ? `Описание: ${createdTask.description}` : ''}\n${createdTask.date ? `Дата: ${new Date(createdTask.date).toLocaleDateString('ru-RU')}` : ''}\n${createdTask.time ? `Время: ${createdTask.time}` : ''}`,
-          icon: '/favicon.ico',
-          badge: '/favicon.ico',
-          requireInteraction: true,
-          vibrate: [200, 100, 200]
-        };
-        window.dispatchEvent(new CustomEvent('taskUpdate', { detail: guardianNotification }));
-
-        // Отправляем уведомление подопечному
-        const dependentNotification = {
-          title: 'Новая задача',
-          body: `Вам назначена новая задача:\n${createdTask.title}\n${createdTask.description ? `Описание: ${createdTask.description}` : ''}\n${createdTask.date ? `Дата: ${new Date(createdTask.date).toLocaleDateString('ru-RU')}` : ''}\n${createdTask.time ? `Время: ${createdTask.time}` : ''}`,
-          icon: '/favicon.ico',
-          badge: '/favicon.ico',
-          requireInteraction: true,
-          vibrate: [200, 100, 200]
-        };
-        window.dispatchEvent(new CustomEvent('newTask', { detail: dependentNotification }));
-
-        // Очищаем форму
-        setNewTask({ title: '', dependentId: '', description: '', date: '', time: '' });
-      } catch (error) {
-        console.error('Ошибка при создании задачи:', error);
-        setError(error.message);
+        // Сбрасываем форму и состояние
+        e.target.reset();
+        setNewTask({ 
+          title: '', 
+          dependentId: '',
+          description: '',
+          date: new Date().toISOString().split('T')[0],
+          time: new Date().toTimeString().slice(0, 5)
+        });
+        return;
       }
-    } else {
-      // Офлайн режим
-      const task = {
-        id: Date.now().toString(),
-        title: newTask.title.trim(),
-        description: newTask.description.trim(),
-        date: newTask.date,
-        time: newTask.time,
-        status: 'pending',
-        dependent_id: newTask.dependentId,
-        created_at: new Date().toISOString()
-      };
 
-      // Сохраняем задачу локально
-      await saveTask(task);
-      await savePendingChange({
-        type: 'create_task',
-        task: task
+      const response = await fetch(`${API_URL}/api/tasks`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify(taskData)
       });
-      setPendingTasks(prev => [...prev, task]);
 
-      // Обновляем UI
+      if (!response.ok) {
+        if (response.status === 401) {
+          localStorage.removeItem('token');
+          navigate('/login');
+          return;
+        }
+        const errorData = await response.json();
+        throw new Error(errorData.message || 'Ошибка при создании задачи');
+      }
+
+      const newTask = await response.json();
+      console.log('Задача успешно создана:', newTask);
+
+      // Сохраняем в IndexedDB
+      await saveTask(newTask);
+
+      // Обновляем состояние
       setTasks(prevTasks => {
-        const dependentTasks = prevTasks[newTask.dependentId] || [];
-        return {
-          ...prevTasks,
-          [newTask.dependentId]: [...dependentTasks, task]
-        };
+        const updated = { ...prevTasks };
+        if (!updated[taskData.dependentId]) {
+          updated[taskData.dependentId] = [];
+        }
+        updated[taskData.dependentId] = [...updated[taskData.dependentId], newTask];
+        return updated;
       });
 
-      // Очищаем форму
-      setNewTask({ title: '', dependentId: '', description: '', date: '', time: '' });
+      // Сбрасываем форму и состояние
+      e.target.reset();
+      setNewTask({ 
+        title: '', 
+        dependentId: '',
+        description: '',
+        date: new Date().toISOString().split('T')[0],
+        time: new Date().toTimeString().slice(0, 5)
+      });
+    } catch (error) {
+      console.error('Ошибка при создании задачи:', error);
+      setError(error.message || 'Не удалось создать задачу');
     }
   };
 
   // Синхронизация при восстановлении соединения
   useEffect(() => {
-    const syncChanges = async () => {
-      if (!navigator.onLine) return;
-
-      const pendingChanges = await getPendingChanges();
-      if (pendingChanges.length === 0) return;
-
-      const token = localStorage.getItem('token');
-      
-      for (const change of pendingChanges) {
+    const syncData = async () => {
+      if (isOnline) {
         try {
-          if (change.type === 'create_task') {
-            const response = await fetch(`${API_URL}/api/tasks`, {
-              method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify({
-                title: change.task.title,
-                dependentId: change.task.dependent_id
-              })
-            });
+          // Синхронизируем отложенные изменения
+          const pendingChanges = await getPendingChanges();
+          
+          if (pendingChanges.length > 0) {
+            console.log('Синхронизация отложенных изменений:', pendingChanges);
+            
+            for (const change of pendingChanges) {
+              try {
+                if (change.type === 'create') {
+                  const response = await fetch(`${API_URL}/api/tasks`, {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      'Authorization': `Bearer ${token}`
+                    },
+                    body: JSON.stringify(change.task)
+                  });
 
-            if (!response.ok) {
-              throw new Error('Ошибка синхронизации');
+                  if (response.ok) {
+                    const newTask = await response.json();
+                    // Обновляем задачу в IndexedDB
+                    await saveTask(newTask);
+                  }
+                } else if (change.type === 'status') {
+                  const response = await fetch(`${API_URL}/api/tasks/${change.taskId}/status`, {
+                    method: 'PATCH',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      'Authorization': `Bearer ${token}`
+                    },
+                    body: JSON.stringify({ 
+                      status: change.newStatus,
+                      lastUpdated: change.timestamp
+                    })
+                  });
+
+                  if (response.ok) {
+                    const updatedTask = await response.json();
+                    // Обновляем задачу в IndexedDB
+                    await saveTask(updatedTask);
+                  }
+                }
+              } catch (error) {
+                console.error('Ошибка при синхронизации изменения:', error);
+                // Продолжаем с следующим изменением
+                continue;
+              }
             }
+
+            // Очищаем отложенные изменения только если все синхронизированы успешно
+            await clearPendingChanges();
           }
+
+          // Обновляем список задач
+          await fetchTasks();
         } catch (error) {
           console.error('Ошибка при синхронизации:', error);
-          return; // Прерываем синхронизацию при ошибке
+          setError('Ошибка при синхронизации данных');
         }
       }
-
-      // Очищаем синхронизированные изменения
-      await clearPendingChanges();
-      // Обновляем список задач
-      await fetchTasks();
     };
 
-    const handleOnline = () => {
-      console.log('Соединение восстановлено');
-      setIsOnline(true);
-      syncChanges();
-    };
-
-    window.addEventListener('online', handleOnline);
-    return () => window.removeEventListener('online', handleOnline);
-  }, []);
+    syncData();
+  }, [isOnline]);
 
   const showTestNotification = async () => {
     try {
@@ -559,12 +544,49 @@ export function GuardianView() {
 
   const handleStatusChange = async (taskId, newStatus) => {
     try {
-      const token = localStorage.getItem('token');
-      const response = await fetch(`${API_URL}/api/tasks/${taskId}`, {
+      if (!isOnline) {
+        // В офлайн режиме обновляем статус локально
+        const updatedTasks = {};
+        let updatedTask = null;
+        
+        for (const depId in tasks) {
+          updatedTasks[depId] = tasks[depId].map(task => {
+            if (task.id === taskId) {
+              updatedTask = { 
+                ...task, 
+                status: newStatus,
+                last_updated: new Date().toISOString()
+              };
+              return updatedTask;
+            }
+            return task;
+          });
+        }
+        
+        setTasks(updatedTasks);
+        
+        // Сохраняем в IndexedDB только обновленную задачу
+        if (updatedTask) {
+          await saveTask(updatedTask);
+        }
+        
+        // Добавляем изменение в pendingChanges
+        await savePendingChange({
+          type: 'status',
+          taskId,
+          newStatus,
+          timestamp: new Date().toISOString()
+        });
+        
+        setError(null); // Очищаем сообщение об ошибке
+        return;
+      }
+
+      const response = await fetch(`${API_URL}/api/tasks/${taskId}/status`, {
         method: 'PATCH',
         headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({ status: newStatus })
       });
@@ -573,53 +595,69 @@ export function GuardianView() {
         throw new Error('Ошибка при обновлении статуса');
       }
 
-      // Мгновенно обновляем состояние задач
+      const updatedTask = await response.json();
+      
+      // Обновляем только конкретную задачу, не перезагружая весь список
       setTasks(prevTasks => {
         const updated = { ...prevTasks };
         for (const depId in updated) {
-          // Находим индекс задачи с нужным ID
           const taskIndex = updated[depId].findIndex(t => t.id === taskId);
           if (taskIndex !== -1) {
-            // Обновляем статус существующей задачи
             updated[depId][taskIndex] = {
               ...updated[depId][taskIndex],
-              status: newStatus
+              status: newStatus,
+              last_updated: updatedTask.last_updated
             };
           }
         }
         return updated;
       });
 
-      // Отправляем уведомление с подробной информацией
-      let taskToNotify = null;
-      for (const depId in tasks) {
-        const task = tasks[depId].find(t => t.id === taskId);
-        if (task) {
-          taskToNotify = task;
-          break;
-        }
+      // Сохраняем обновленную задачу в IndexedDB
+      await saveTask(updatedTask);
+
+      // Отправляем уведомление через WebSocket
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'task_status_changed',
+          taskId,
+          newStatus,
+          userId: user.id,
+          timestamp: new Date().toISOString()
+        }));
       }
 
-      if (taskToNotify) {
-        const notification = {
-          title: 'Статус задачи обновлен',
-          body: `Задача: ${taskToNotify.title}\n${taskToNotify.description ? `Описание: ${taskToNotify.description}` : ''}\nНовый статус: ${newStatus === 'completed' ? 'Выполнено' : 'В процессе'}`,
-          icon: '/favicon.ico',
-          badge: '/favicon.ico',
-          requireInteraction: true,
-          vibrate: [200, 100, 200]
-        };
-        window.dispatchEvent(new CustomEvent('taskUpdate', { detail: notification }));
-      }
+      setError(null); // Очищаем сообщение об ошибке при успешном обновлении
     } catch (error) {
       console.error('Ошибка при обновлении статуса:', error);
-      setError(error.message);
+      setError('Не удалось обновить статус задачи');
     }
   };
 
   const handleDeleteTask = async (taskId) => {
     try {
-      const token = localStorage.getItem('token');
+      if (!navigator.onLine) {
+        // В офлайн режиме сохраняем изменение в очередь синхронизации
+        await savePendingChange({
+          type: 'delete_task',
+          taskId,
+          timestamp: new Date().toISOString()
+        });
+
+        // Удаляем задачу из локального хранилища
+        await deleteTask(taskId);
+
+        // Обновляем UI
+        setTasks(prevTasks => {
+          const updated = { ...prevTasks };
+          for (const depId in updated) {
+            updated[depId] = updated[depId].filter(t => t.id !== taskId);
+          }
+          return updated;
+        });
+        return;
+      }
+
       const response = await fetch(`${API_URL}/api/tasks/${taskId}`, {
         method: 'DELETE',
         headers: {
@@ -632,17 +670,10 @@ export function GuardianView() {
         throw new Error(errorData.message || 'Ошибка при удалении задачи');
       }
 
-      // Находим задачу в объекте tasks
-      let taskToDelete = null;
-      for (const dependentId in tasks) {
-        const task = tasks[dependentId].find(t => t.id === taskId);
-        if (task) {
-          taskToDelete = task;
-          break;
-        }
-      }
+      // Удаляем задачу из локального хранилища
+      await deleteTask(taskId);
 
-      // Мгновенно обновляем состояние задач
+      // Обновляем UI
       setTasks(prevTasks => {
         const updated = { ...prevTasks };
         for (const depId in updated) {
@@ -651,17 +682,14 @@ export function GuardianView() {
         return updated;
       });
 
-      // Отправляем уведомление об удалении
-      if (taskToDelete) {
+      // Отправляем уведомление через WebSocket
+      if (ws && ws.readyState === WebSocket.OPEN) {
         const notification = {
-          title: 'Задача удалена',
-          body: `Задача: ${taskToDelete.title}\n${taskToDelete.description ? `Описание: ${taskToDelete.description}` : ''}\nБыла удалена из системы`,
-          icon: '/favicon.ico',
-          badge: '/favicon.ico',
-          requireInteraction: true,
-          vibrate: [200, 100, 200]
+          type: 'delete_task',
+          taskId: taskId,
+          timestamp: new Date().toISOString()
         };
-        window.dispatchEvent(new CustomEvent('taskUpdate', { detail: notification }));
+        ws.send(JSON.stringify(notification));
       }
     } catch (error) {
       console.error('Ошибка при удалении задачи:', error);
@@ -707,74 +735,76 @@ export function GuardianView() {
     }
   };
 
-  // Добавляем WebSocket соединение
+  // WebSocket соединение
   useEffect(() => {
-    const token = localStorage.getItem('token');
     if (!token) return;
 
-    let ws = null;
     let reconnectAttempts = 0;
     const maxReconnectAttempts = 5;
-    const reconnectDelay = 3000; // 3 секунды
+    const reconnectDelay = 3000;
 
     const connectWebSocket = () => {
-      try {
-        console.log('Попытка установить WebSocket соединение');
-        ws = new WebSocket(`ws://localhost:3001?token=${token}`);
+      console.log('Попытка установить WebSocket соединение');
+      const socket = new WebSocket(`ws://localhost:3001/ws?token=${token}`);
 
-        ws.onopen = () => {
-          console.log('WebSocket соединение установлено');
-          reconnectAttempts = 0; // Сбрасываем счетчик попыток при успешном подключении
-        };
+      socket.onopen = () => {
+        console.log('WebSocket соединение установлено');
+        setWs(socket);
+        reconnectAttempts = 0;
+      };
 
-        ws.onmessage = (event) => {
-          try {
-            console.log('Получено WebSocket сообщение:', event.data);
-            const notification = JSON.parse(event.data);
-            
-            if (notification.type === 'task_reminder') {
-              console.log('Отправляем уведомление:', notification);
-              sendNotification(notification.title, notification.body);
-            } else if (notification.type === 'connection_established') {
-              console.log('Подтверждение подключения получено:', notification.message);
-            }
-          } catch (error) {
-            console.error('Ошибка при обработке сообщения:', error);
+      socket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          console.log('Получено сообщение:', data);
+
+          if (data.type === 'task_status_changed') {
+            setTasks(prevTasks => {
+              const updated = { ...prevTasks };
+              for (const depId in updated) {
+                const taskIndex = updated[depId].findIndex(t => t.id === data.taskId);
+                if (taskIndex !== -1) {
+                  updated[depId][taskIndex] = {
+                    ...updated[depId][taskIndex],
+                    status: data.newStatus,
+                    last_updated: data.timestamp
+                  };
+                }
+              }
+              return updated;
+            });
           }
-        };
+        } catch (error) {
+          console.error('Ошибка при обработке сообщения:', error);
+        }
+      };
 
-        ws.onerror = (error) => {
-          console.error('WebSocket ошибка:', error);
-          setError('Ошибка соединения с сервером уведомлений');
-        };
+      socket.onerror = (error) => {
+        console.error('WebSocket ошибка:', error);
+      };
 
-        ws.onclose = (event) => {
-          console.log('WebSocket соединение закрыто:', event.code, event.reason);
-          
-          // Пытаемся переподключиться, если это не было намеренное закрытие
-          if (event.code !== 1000 && reconnectAttempts < maxReconnectAttempts) {
-            reconnectAttempts++;
-            console.log(`Попытка переподключения ${reconnectAttempts} из ${maxReconnectAttempts}`);
-            setTimeout(connectWebSocket, reconnectDelay);
-          } else if (reconnectAttempts >= maxReconnectAttempts) {
-            console.log('Достигнуто максимальное количество попыток переподключения');
-            setError('Не удалось установить соединение с сервером уведомлений');
-          }
-        };
-      } catch (error) {
-        console.error('Ошибка при создании WebSocket:', error);
-        setError('Ошибка при создании соединения с сервером уведомлений');
-      }
+      socket.onclose = (event) => {
+        console.log('WebSocket соединение закрыто:', event.code);
+        setWs(null);
+
+        if (reconnectAttempts < maxReconnectAttempts) {
+          reconnectAttempts++;
+          console.log(`Попытка переподключения ${reconnectAttempts} из ${maxReconnectAttempts}`);
+          setTimeout(connectWebSocket, reconnectDelay);
+        } else {
+          console.log('Достигнуто максимальное количество попыток переподключения');
+        }
+      };
     };
 
     connectWebSocket();
 
     return () => {
       if (ws) {
-        ws.close(1000, 'Компонент размонтирован');
+        ws.close();
       }
     };
-  }, []);
+  }, [token]);
 
   // Обработчик для получения уведомлений
   useEffect(() => {
@@ -835,68 +865,7 @@ export function GuardianView() {
       width: '100%',
       boxSizing: 'border-box'
     }}>
-      <header style={{ 
-        display: 'flex', 
-        justifyContent: 'space-between', 
-        alignItems: 'center', 
-        marginBottom: '2rem',
-        backgroundColor: '#ffffff',
-        padding: '20px',
-        borderRadius: '12px',
-        boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
-      }}>
-        <div>
-          <h1 style={{ 
-            margin: 0,
-            fontSize: '24px',
-            color: '#2c3e50',
-            fontWeight: '600'
-          }}>Панель опекуна</h1>
-          <p style={{ 
-            margin: '5px 0 0 0',
-            color: '#666',
-            fontSize: '14px'
-          }}>Управление задачами подопечных</p>
-        </div>
-        <nav>
-          <Link 
-            to="/"
-            style={{
-              padding: '8px 16px',
-              backgroundColor: '#6c757d',
-              color: 'white',
-              textDecoration: 'none',
-              borderRadius: '6px',
-              fontSize: '14px',
-              fontWeight: '500',
-              transition: 'background-color 0.2s',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px'
-            }}
-          >
-            <FaHome />
-            На главную
-          </Link>
-        </nav>
-      </header>
-
       <main>
-        <section style={{ 
-          backgroundColor: '#ffffff', 
-          padding: '25px', 
-          borderRadius: '12px',
-          marginBottom: '2rem',
-          boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
-        }}>
-          <h2 style={{ 
-            margin: 0,
-            fontSize: '20px',
-            color: '#2c3e50',
-            fontWeight: '600'
-          }}>Добро пожаловать, {userName}!</h2>
-        </section>
-
         {error && (
           <div role="alert" style={{ 
             backgroundColor: '#fee2e2',
@@ -913,71 +882,7 @@ export function GuardianView() {
             {error}
           </div>
         )}
-
-        <section style={{ 
-          marginBottom: '30px',
-          backgroundColor: '#ffffff',
-          padding: '25px',
-          borderRadius: '12px',
-          boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
-        }}>
-          <h3 style={{ 
-            margin: '0 0 15px 0',
-            fontSize: '18px',
-            color: '#2c3e50',
-            fontWeight: '600',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px'
-          }}>
-            <FaUserPlus />
-            Добавить подопечного
-          </h3>
-          <form onSubmit={handleLinkDependent} style={{ display: 'flex', gap: '10px' }}>
-            <label htmlFor="dependent-code" style={{ display: 'none' }}>
-              Код подопечного
-            </label>
-            <input
-              id="dependent-code"
-              type="text"
-              value={linkCode}
-              onChange={(e) => setLinkCode(e.target.value)}
-              placeholder="Введите код подопечного"
-              aria-label="Код подопечного"
-              style={{
-                flex: 1,
-                padding: '12px',
-                borderRadius: '8px',
-                border: '1px solid #e0e0e0',
-                fontSize: '14px',
-                backgroundColor: '#f8f9fa',
-                transition: 'border-color 0.2s'
-              }}
-            />
-            <button
-              type="submit"
-              aria-label="Добавить подопечного"
-              style={{
-                padding: '12px 24px',
-                backgroundColor: '#6c5ce7',
-                color: 'white',
-                border: 'none',
-                borderRadius: '8px',
-                cursor: 'pointer',
-                fontSize: '14px',
-                fontWeight: '500',
-                transition: 'background-color 0.2s',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '8px'
-              }}
-            >
-              <FaPlus />
-              Добавить
-            </button>
-          </form>
-        </section>
-
+        
         {!isOnline && (
           <div role="alert" style={{ 
             backgroundColor: '#fff3cd', 
@@ -1003,6 +908,96 @@ export function GuardianView() {
             Ожидает синхронизации: {pendingTasks.length} задач
           </div>
         )}
+
+        <section style={{ 
+          display: 'flex', 
+          justifyContent: 'space-between', 
+          alignItems: 'center', 
+          marginBottom: '2rem',
+          backgroundColor: '#ffffff',
+          padding: '20px',
+          borderRadius: '12px',
+          boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
+        }}>
+          <h2 style={{ 
+            margin: 0,
+            fontSize: '24px',
+            color: '#2c3e50',
+            fontWeight: '600'
+          }}>Добро пожаловать, {userName}!</h2>
+        </section>
+
+        <section style={{ 
+          marginBottom: '30px',
+          backgroundColor: '#ffffff',
+          padding: '25px',
+          borderRadius: '12px',
+          boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
+        }}>
+          <h3 style={{ 
+            margin: '0 0 15px 0',
+            fontSize: '18px',
+            color: '#2c3e50',
+            fontWeight: '600',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px'
+          }}>
+            <FaUserPlus />
+            Добавить подопечного
+          </h3>
+          <form onSubmit={handleLinkDependent} style={{ 
+            display: 'flex', 
+            flexDirection: 'column',
+            gap: '10px',
+            width: '100%'
+          }}>
+            <label htmlFor="dependent-code" style={{ display: 'none' }}>
+              Код подопечного
+            </label>
+            <input
+              id="dependent-code"
+              type="text"
+              value={linkCode}
+              onChange={(e) => setLinkCode(e.target.value)}
+              placeholder="Введите код подопечного"
+              aria-label="Код подопечного"
+              style={{
+                width: '100%',
+                padding: '12px',
+                borderRadius: '8px',
+                border: '1px solid #e0e0e0',
+                fontSize: '14px',
+                backgroundColor: '#f8f9fa',
+                transition: 'border-color 0.2s',
+                boxSizing: 'border-box'
+              }}
+            />
+            <button
+              type="submit"
+              aria-label="Добавить подопечного"
+              style={{
+                width: '100%',
+                padding: '12px',
+                backgroundColor: '#6c5ce7',
+                color: 'white',
+                border: 'none',
+                borderRadius: '8px',
+                cursor: 'pointer',
+                fontSize: '14px',
+                fontWeight: '500',
+                transition: 'background-color 0.2s',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px'
+              }}
+            >
+              <FaPlus />
+              Добавить
+            </button>
+          </form>
+        </section>
 
         {dependents.length === 0 ? (
           <section style={{ 
@@ -1057,7 +1052,7 @@ export function GuardianView() {
                 </div>
                 
                 <form onSubmit={handleCreateTask} style={{ marginBottom: '20px' }}>
-                  <input type="hidden" name="dependentId" value={dependent.id} />
+                  <input type="hidden" name="dependent_id" value={dependent.id} />
                   <div style={{ 
                     display: 'flex', 
                     flexDirection: 'column', 
@@ -1074,6 +1069,7 @@ export function GuardianView() {
                       <input
                         id={`task-title-${dependent.id}`}
                         type="text"
+                        name="title"
                         value={newTask.dependentId === dependent.id ? newTask.title : ''}
                         onChange={(e) => setNewTask(prev => ({ ...prev, title: e.target.value, dependentId: dependent.id }))}
                         placeholder="Название задачи"
@@ -1095,6 +1091,7 @@ export function GuardianView() {
                     </label>
                     <textarea
                       id={`task-description-${dependent.id}`}
+                      name="description"
                       value={newTask.dependentId === dependent.id ? newTask.description : ''}
                       onChange={(e) => setNewTask(prev => ({ ...prev, description: e.target.value, dependentId: dependent.id }))}
                       placeholder="Описание задачи"
@@ -1119,6 +1116,7 @@ export function GuardianView() {
                       <input
                         id={`task-date-${dependent.id}`}
                         type="date"
+                        name="date"
                         value={newTask.dependentId === dependent.id ? newTask.date : ''}
                         onChange={(e) => setNewTask(prev => ({ ...prev, date: e.target.value, dependentId: dependent.id }))}
                         aria-label="Дата выполнения"
@@ -1138,6 +1136,7 @@ export function GuardianView() {
                       <input
                         id={`task-time-${dependent.id}`}
                         type="time"
+                        name="time"
                         value={newTask.dependentId === dependent.id ? newTask.time : ''}
                         onChange={(e) => setNewTask(prev => ({ ...prev, time: e.target.value, dependentId: dependent.id }))}
                         aria-label="Время выполнения"

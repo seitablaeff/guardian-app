@@ -129,4 +129,21 @@ export const clearPendingChanges = async () => {
     console.error('Ошибка при очистке отложенных изменений:', error);
     return Promise.reject(error);
   }
+};
+
+export const deleteTask = async (taskId) => {
+  try {
+    const db = await initDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(['tasks'], 'readwrite');
+      const store = transaction.objectStore('tasks');
+      const request = store.delete(taskId);
+
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
+  } catch (error) {
+    console.error('Ошибка при удалении задачи:', error);
+    return Promise.reject(error);
+  }
 }; 

@@ -26,6 +26,16 @@ const db = new sqlite3.Database(dbPath, (err) => {
         )
       `);
 
+      // Таблица опекунов
+      db.run(`
+        CREATE TABLE IF NOT EXISTS guardians (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+      `);
+
       // Таблица задач
       db.run(`
         CREATE TABLE IF NOT EXISTS tasks (

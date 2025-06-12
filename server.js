@@ -9,7 +9,38 @@ const WebSocket = require('ws');
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+const wss = new WebSocket.Server({ 
+  server,
+  path: '/ws',
+  clientTracking: true,
+  perMessageDeflate: false,
+  verifyClient: (info, callback) => {
+    try {
+      const url = new URL(info.req.url, 'ws://localhost');
+      const token = url.searchParams.get('token');
+      
+      if (!token) {
+        console.log('Отсутствует токен, отклоняем соединение');
+        callback(false, 401, 'Токен не предоставлен');
+        return;
+      }
+
+      jwt.verify(token, JWT_SECRET, (err, user) => {
+        if (err) {
+          console.log('Ошибка верификации токена:', err.message);
+          callback(false, 401, 'Недействительный токен');
+          return;
+        }
+
+        info.req.user = user;
+        callback(true);
+      });
+    } catch (error) {
+      console.error('Ошибка при верификации клиента:', error);
+      callback(false, 500, 'Внутренняя ошибка сервера');
+    }
+  }
+});
 
 // Хранилище для активных соединений
 const clients = new Map();
@@ -17,88 +48,92 @@ const clients = new Map();
 // Обработка WebSocket соединений
 wss.on('connection', (ws, req) => {
   console.log('Новое WebSocket соединение');
+  const user = req.user;
   
-  // Получаем токен из URL
-  const url = new URL(req.url, 'ws://localhost');
-  const token = url.searchParams.get('token');
-  
-  if (!token) {
-    console.log('Отсутствует токен, закрываем соединение');
-    ws.close(1008, 'Токен не предоставлен');
-    return;
+  console.log('Пользователь авторизован:', user.id);
+
+  // Проверяем, нет ли уже активного соединения для этого пользователя
+  const existingClient = clients.get(user.id);
+  if (existingClient && existingClient.ws.readyState === WebSocket.OPEN) {
+    console.log('Закрываем существующее соединение для пользователя:', user.id);
+    existingClient.ws.close(1000, 'Новое соединение');
   }
 
-  // Проверяем токен
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) {
-      console.log('Ошибка верификации токена:', err.message);
-      ws.close(1008, 'Недействительный токен');
-      return;
-    }
+  // Сохраняем соединение
+  clients.set(user.id, {
+    ws,
+    role: user.role,
+    lastActivity: Date.now()
+  });
 
-    console.log('Пользователь авторизован:', user.id);
+  // Отправляем подтверждение подключения
+  try {
+    ws.send(JSON.stringify({
+      type: 'connection_established',
+      message: 'Соединение установлено',
+      userId: user.id,
+      role: user.role
+    }));
+  } catch (error) {
+    console.error('Ошибка при отправке подтверждения:', error);
+  }
 
-    // Проверяем, нет ли уже активного соединения для этого пользователя
-    const existingClient = clients.get(user.id);
-    if (existingClient && existingClient.ws.readyState === WebSocket.OPEN) {
-      console.log('Закрываем существующее соединение для пользователя:', user.id);
-      existingClient.ws.close(1000, 'Новое соединение');
-    }
-
-    // Сохраняем соединение
-    clients.set(user.id, {
-      ws,
-      role: user.role,
-      lastActivity: Date.now()
-    });
-
-    // Отправляем подтверждение подключения
+  // Обработка сообщений
+  ws.on('message', (message) => {
     try {
-      ws.send(JSON.stringify({
-        type: 'connection_established',
-        message: 'Соединение установлено'
-      }));
-    } catch (error) {
-      console.error('Ошибка при отправке подтверждения:', error);
-    }
+      const data = JSON.parse(message);
+      console.log('Получено сообщение от пользователя', user.id, ':', data);
 
-    // Обработка отключения
-    ws.on('close', (code, reason) => {
-      console.log('Пользователь отключился:', user.id, 'Код:', code, 'Причина:', reason);
-      clients.delete(user.id);
-    });
-
-    // Обработка ошибок
-    ws.on('error', (error) => {
-      console.error('WebSocket ошибка для пользователя', user.id, ':', error);
-      clients.delete(user.id);
-    });
-
-    // Пинг для поддержания соединения
-    const pingInterval = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) {
-        try {
-          ws.ping();
-        } catch (error) {
-          console.error('Ошибка при отправке пинга:', error);
-          clearInterval(pingInterval);
-          ws.close();
-        }
-      } else {
-        clearInterval(pingInterval);
+      if (data.type === 'ping') {
+        ws.send(JSON.stringify({
+          type: 'pong',
+          timestamp: data.timestamp,
+          userId: user.id
+        }));
       }
-    }, 30000); // Каждые 30 секунд
+    } catch (error) {
+      console.error('Ошибка при обработке сообщения:', error);
+    }
+  });
 
-    // Очистка при отключении
-    ws.on('close', () => {
+  // Обработка отключения
+  ws.on('close', (code, reason) => {
+    console.log('Пользователь отключился:', user.id, 'Код:', code, 'Причина:', reason);
+    clients.delete(user.id);
+  });
+
+  // Обработка ошибок
+  ws.on('error', (error) => {
+    console.error('WebSocket ошибка для пользователя', user.id, ':', error);
+    clients.delete(user.id);
+  });
+
+  // Пинг для поддержания соединения
+  const pingInterval = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.ping();
+      } catch (error) {
+        console.error('Ошибка при отправке пинга:', error);
+        clearInterval(pingInterval);
+        ws.close();
+      }
+    } else {
       clearInterval(pingInterval);
-    });
+    }
+  }, 30000); // Каждые 30 секунд
+
+  // Очистка при отключении
+  ws.on('close', () => {
+    clearInterval(pingInterval);
   });
 });
 
 // Функция для отправки уведомлений
 const sendNotification = (userId, notification) => {
   console.log('Попытка отправить уведомление пользователю:', userId);
+  console.log('Уведомление:', notification);
+  
   const client = clients.get(userId);
   
   if (!client) {
@@ -108,24 +143,38 @@ const sendNotification = (userId, notification) => {
 
   if (client.ws.readyState === WebSocket.OPEN) {
     try {
-      console.log('Отправляем уведомление:', notification);
-      client.ws.send(JSON.stringify(notification));
-      client.lastActivity = Date.now();
+      console.log('Отправляем уведомление через WebSocket');
+      const message = JSON.stringify({
+        ...notification,
+        userId,
+        timestamp: new Date().toISOString()
+      });
+      console.log('Сообщение для отправки:', message);
+      
+      client.ws.send(message, (error) => {
+        if (error) {
+          console.error('Ошибка при отправке уведомления:', error);
+          clients.delete(userId);
+        } else {
+          console.log('Уведомление успешно отправлено');
+          client.lastActivity = Date.now();
+        }
+      });
     } catch (error) {
       console.error('Ошибка при отправке уведомления:', error);
       clients.delete(userId);
     }
   } else {
-    console.log('WebSocket соединение не активно');
+    console.log('WebSocket соединение не активно, состояние:', client.ws.readyState);
     clients.delete(userId);
   }
 };
 
 // Настройка CORS
 app.use(cors({
-  origin: 'http://localhost:5173', // URL вашего React-приложения
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  origin: ['http://localhost:5173', 'http://localhost:3001', 'http://127.0.0.1:5173', 'http://127.0.0.1:3001'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
   credentials: true
 }));
 
@@ -448,6 +497,18 @@ app.post('/api/tasks', authenticateToken, (req, res) => {
 
           console.log('Задача создана:', { id, title, description, date, time, status: 'pending', guardianId: req.user.id, dependentId });
           
+          // Отправляем уведомление подопечному через WebSocket
+          const notification = {
+            type: 'new_task',
+            title: 'Новая задача',
+            body: `Вам назначена новая задача:\n${title}\n${description ? `Описание: ${description}` : ''}\nДата: ${new Date(date).toLocaleDateString('ru-RU')}\nВремя: ${time}`,
+            taskId: id,
+            timestamp: createdAt
+          };
+          
+          console.log('Отправляем уведомление подопечному:', dependentId);
+          sendNotification(dependentId, notification);
+          
           res.status(201).json({ 
             id,
             title,
@@ -528,75 +589,85 @@ app.get('/api/tasks/dependent', authenticateToken, (req, res) => {
   }
 });
 
-// Обновление статуса задачи
-app.patch('/api/tasks/:taskId', authenticateToken, validateData, (req, res) => {
-  const { status, lastUpdated } = req.body;
-  const { taskId } = req.params;
-
-  try {
-    // Проверяем доступ к задаче и получаем текущую версию
-    db.get(`
-      SELECT t.*, u.name as guardian_name, d.name as dependent_name 
-      FROM tasks t
-      JOIN users u ON t.guardian_id = u.id
-      JOIN users d ON t.dependent_id = d.id
-      WHERE t.id = ? AND (t.guardian_id = ? OR t.dependent_id = ?)
-    `, [taskId, req.user.id, req.user.id], (err, task) => {
-      if (err) {
-        console.error('Ошибка при проверке задачи:', err);
-        return res.status(500).json({ message: 'Ошибка при обновлении задачи' });
-      }
-
-      if (!task) {
-        return res.status(404).json({ message: 'Задача не найдена' });
-      }
-
-      // Проверяем конфликт версий
-      if (lastUpdated && new Date(lastUpdated) < new Date(task.last_updated)) {
-        return res.status(409).json({ 
-          message: 'Конфликт версий',
-          currentVersion: task.last_updated,
-          currentStatus: task.status
-        });
-      }
-
-      // Обновляем задачу
-      const now = new Date().toISOString();
-      db.run(
-        'UPDATE tasks SET status = ?, last_updated = ? WHERE id = ?',
-        [status, now, taskId],
-        function(err) {
-          if (err) {
-            console.error('Ошибка при обновлении задачи:', err);
-            return res.status(500).json({ message: 'Ошибка при обновлении задачи' });
-          }
-
-          // Отправляем уведомление о конфликте, если он был
-          if (lastUpdated && new Date(lastUpdated) < new Date(task.last_updated)) {
-            const notification = {
-              title: 'Обнаружен конфликт версий',
-              body: `Задача "${task.title}" была изменена другим пользователем. Текущий статус: ${task.status}`,
-              type: 'conflict'
-            };
-
-            if (req.user.role === 'guardian') {
-              console.log(`Отправка уведомления опекуну ${task.guardian_name}:`, notification);
-            } else {
-              console.log(`Отправка уведомления подопечному ${task.dependent_name}:`, notification);
-            }
-          }
-
-          res.json({ 
-            id: taskId,
-            status,
-            lastUpdated: now
-          });
-        }
-      );
+// Вспомогательные функции для работы с sqlite3 через промисы
+function runAsync(sql, params) {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function(err) {
+      if (err) reject(err);
+      else resolve(this);
     });
+  });
+}
+
+function getAsync(sql, params) {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, function(err, row) {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+}
+
+// Обновление статуса задачи
+app.patch('/api/tasks/:taskId/status', authenticateToken, async (req, res) => {
+  try {
+    const { taskId } = req.params;
+    const { status } = req.body;
+    const userId = req.user.id;
+
+    // Проверяем, что статус валидный
+    if (!['pending', 'in_progress', 'completed', 'cancelled'].includes(status)) {
+      return res.status(400).json({ message: 'Неверный статус задачи' });
+    }
+
+    // Получаем задачу
+    const task = await getAsync('SELECT * FROM tasks WHERE id = ?', [taskId]);
+    if (!task) {
+      return res.status(404).json({ message: 'Задача не найдена' });
+    }
+
+    // Проверяем права доступа
+    // Опекун может быть только тот, кто создал задачу
+    const isGuardian = (task.guardian_id === userId);
+    const isDependent = (task.dependent_id === userId);
+
+    if (!isGuardian && !isDependent) {
+      return res.status(403).json({ message: 'Нет доступа к этой задаче' });
+    }
+
+    // Обновляем статус
+    await runAsync(
+      'UPDATE tasks SET status = ?, last_updated = CURRENT_TIMESTAMP WHERE id = ?',
+      [status, taskId]
+    );
+
+    // Получаем обновленную задачу
+    const updatedTask = await getAsync(`
+      SELECT t.*, u.name as dependent_name 
+      FROM tasks t 
+      LEFT JOIN users u ON t.dependent_id = u.id 
+      WHERE t.id = ?
+    `, [taskId]);
+
+    // Отправляем уведомление через WebSocket
+    const notification = {
+      type: 'task_status_changed',
+      taskId,
+      newStatus: status,
+      userId,
+      timestamp: new Date().toISOString()
+    };
+
+    wss.clients.forEach(client => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify(notification));
+      }
+    });
+
+    res.json(updatedTask);
   } catch (error) {
-    console.error('Ошибка при обновлении задачи:', error);
-    res.status(500).json({ message: 'Ошибка при обновлении задачи' });
+    console.error('Ошибка при обновлении статуса задачи:', error);
+    res.status(500).json({ message: 'Внутренняя ошибка сервера' });
   }
 });
 
@@ -671,37 +742,62 @@ const checkScheduledTasks = async () => {
     const now = new Date();
     const thirtyMinutesFromNow = new Date(now.getTime() + 30 * 60000);
 
-    const tasks = await db.all(`
-      SELECT t.*, u.id as user_id, u.role
-      FROM tasks t
-      JOIN users u ON t.user_id = u.id
-      WHERE t.status != 'completed'
-      AND t.date IS NOT NULL
-      AND t.time IS NOT NULL
-      AND datetime(t.date || 'T' || t.time) BETWEEN datetime(?) AND datetime(?)
-    `, [now.toISOString(), thirtyMinutesFromNow.toISOString()]);
+    console.log('Текущее время:', now.toISOString());
+    console.log('Время через 30 минут:', thirtyMinutesFromNow.toISOString());
+
+    const tasks = await new Promise((resolve, reject) => {
+      db.all(`
+        SELECT t.*, u.id as user_id, u.role, u.name as user_name
+        FROM tasks t
+        JOIN users u ON (t.guardian_id = u.id OR t.dependent_id = u.id)
+        WHERE t.status != 'completed'
+        AND t.date IS NOT NULL
+        AND t.time IS NOT NULL
+        AND datetime(t.date || 'T' || t.time) BETWEEN datetime(?) AND datetime(?)
+      `, [now.toISOString(), thirtyMinutesFromNow.toISOString()], (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows);
+      });
+    });
 
     console.log('Найдено задач для уведомлений:', tasks.length);
+    console.log('Задачи:', tasks);
 
     for (const task of tasks) {
       const taskDateTime = new Date(`${task.date}T${task.time}`);
       const timeDiff = taskDateTime - now;
       
+      console.log('Проверка задачи:', {
+        id: task.id,
+        title: task.title,
+        date: task.date,
+        time: task.time,
+        timeDiff: timeDiff / 1000 / 60, // разница в минутах
+        user_id: task.user_id,
+        role: task.role
+      });
+
       // Отправляем уведомление опекуну
       if (task.role === 'guardian') {
+        console.log('Отправка уведомления опекуну:', task.user_id);
         sendNotification(task.user_id, {
           type: 'task_reminder',
           title: 'Напоминание о задаче',
-          body: `Скоро наступает задача:\n${task.title}\n${task.description ? `Описание: ${task.description}` : ''}\nВремя: ${task.time}`
+          body: `Скоро наступает задача:\n${task.title}\n${task.description ? `Описание: ${task.description}` : ''}\nВремя: ${task.time}`,
+          taskId: task.id,
+          timestamp: new Date().toISOString()
         });
       }
 
       // Отправляем уведомление подопечному
       if (task.role === 'dependent') {
+        console.log('Отправка уведомления подопечному:', task.user_id);
         sendNotification(task.user_id, {
           type: 'task_reminder',
           title: 'Напоминание о задаче',
-          body: `Скоро наступает задача:\n${task.title}\n${task.description ? `Описание: ${task.description}` : ''}\nВремя: ${task.time}`
+          body: `Скоро наступает задача:\n${task.title}\n${task.description ? `Описание: ${task.description}` : ''}\nВремя: ${task.time}`,
+          taskId: task.id,
+          timestamp: new Date().toISOString()
         });
       }
     }
@@ -712,6 +808,9 @@ const checkScheduledTasks = async () => {
 
 // Запускаем проверку задач каждую минуту
 setInterval(checkScheduledTasks, 60000);
+
+// Запускаем первую проверку сразу после старта сервера
+checkScheduledTasks();
 
 // Запуск сервера
 const PORT = 3001;

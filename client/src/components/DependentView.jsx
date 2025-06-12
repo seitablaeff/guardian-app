@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { API_URL } from '../config';
 import { saveTask, getTasks, savePendingChange, getPendingChanges, clearPendingChanges } from '../utils/db';
 import { FaCheck, FaTimes, FaBell, FaHome, FaClipboardList, FaExclamationCircle } from 'react-icons/fa';
-import { MdDescription, MdDateRange, MdAccessTime, MdPending, MdNotifications } from 'react-icons/md';
+import { MdDescription, MdDateRange, MdAccessTime, MdPending } from 'react-icons/md';
 
 export function DependentView() {
   const [tasks, setTasks] = useState([]);
@@ -13,6 +13,9 @@ export function DependentView() {
   const [userCode, setUserCode] = useState('');
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [pendingChanges, setPendingChanges] = useState([]);
+  const [wsError, setWsError] = useState(null);
+  const [ws, setWs] = useState(null);
+  const [notifications, setNotifications] = useState([]);
 
   const fetchTasks = async () => {
     try {
@@ -169,127 +172,215 @@ export function DependentView() {
     }
   };
 
+  // Функция для проверки поддержки уведомлений
+  useEffect(() => {
+    if (!('Notification' in window)) {
+      setError('Браузер не поддерживает уведомления');
+      return;
+    }
+    
+    // Проверяем текущее разрешение
+    if (Notification.permission === 'denied') {
+      setError('Уведомления отключены в браузере');
+    }
+  }, []);
+
   // Функция для проверки приближающихся задач
   const checkUpcomingTasks = () => {
-    const now = new Date();
+    console.log('[Notification Check] Запуск проверки в', new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }));
+    console.log('Активные задачи:', tasks.filter(t => t.status !== 'completed'));
+    
+    if (document.visibilityState !== 'visible') {
+      console.log('Вкладка неактивна, пропускаем проверку');
+      return;
+    }
+
     tasks.forEach(task => {
-      if (task.date && task.time && task.status !== 'completed') {
-        const taskDate = new Date(`${task.date}T${task.time}`);
-        const timeDiff = taskDate - now;
+      try {
+        console.log(`Проверка задачи: ${task.title} [${task.status}]`);
         
-        // Если задача наступает через 30 минут
-        if (timeDiff > 0 && timeDiff <= 30 * 60 * 1000) {
-          const notification = {
-            title: 'Напоминание о задаче',
-            body: `Скоро наступает задача:\n${task.title}\n${task.description ? `Описание: ${task.description}` : ''}\nВремя: ${task.time}`,
-            icon: '/favicon.ico',
-            badge: '/favicon.ico',
-            requireInteraction: true,
-            vibrate: [200, 100, 200]
-          };
-          window.dispatchEvent(new CustomEvent('taskUpdate', { detail: notification }));
+        if (!task.date || !task.time) {
+          console.log('Пропуск задачи: отсутствует дата или время');
+          return;
         }
+
+        // Создаем объект даты для задачи в локальном времени
+        const [hours, minutes] = task.time.split(':').map(Number);
+        const taskDate = new Date(task.date);
+        taskDate.setHours(hours, minutes, 0, 0);
+        
+        console.log('Время задачи:', taskDate.toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }));
+        
+        const now = new Date();
+        console.log('Текущее время:', now.toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }));
+        
+        const timeDiff = taskDate - now;
+        console.log('Разница во времени (минуты):', Math.floor(timeDiff / (1000 * 60)));
+        
+        // Проверяем, не отправляли ли мы уже уведомление
+        const lastNotified = localStorage.getItem(`lastNotified_${task.id}`);
+        if (lastNotified) {
+          const lastNotifiedTime = new Date(parseInt(lastNotified));
+          const timeSinceLastNotification = now - lastNotifiedTime;
+          console.log('Последнее уведомление было отправлено:', 
+            lastNotifiedTime.toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }));
+          console.log('Прошло времени с последнего уведомления (минуты):', 
+            Math.floor(timeSinceLastNotification / (1000 * 60)));
+
+          // Если уведомление было отправлено менее 25 минут назад, пропускаем
+          if (timeSinceLastNotification < 25 * 60 * 1000) {
+            console.log('Пропуск уведомления: уже отправляли менее 25 минут назад');
+            return;
+          }
+        }
+
+        // Проверяем, наступило ли время задачи (с точностью до 30 секунд)
+        const isTaskTime = Math.abs(timeDiff) <= 30 * 1000; // 30 секунд
+        
+        if (isTaskTime) {
+          console.log('Отправка уведомления для задачи:', task.title);
+          
+          // Отправляем уведомление через WebSocket
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            const notification = {
+              type: 'task_reminder',
+              title: 'Время выполнить задачу',
+              body: `Наступило время для задачи:\n${task.title}\n${task.description ? `Описание: ${task.description}` : ''}\nВремя: ${task.time}`,
+              taskId: task.id,
+              timestamp: new Date().toISOString()
+            };
+            ws.send(JSON.stringify(notification));
+          }
+          
+          // Отправляем локальное уведомление
+          sendNotification(
+            'Время выполнить задачу',
+            `Наступило время для задачи:\n${task.title}\n${task.description ? `Описание: ${task.description}` : ''}\nВремя: ${task.time}`
+          );
+
+          // Сохраняем время последнего уведомления
+          localStorage.setItem(`lastNotified_${task.id}`, Date.now().toString());
+        } else {
+          console.log('Задача не требует уведомления:', 
+            timeDiff < 0 ? 'время уже прошло' : 'время еще не наступило');
+        }
+      } catch (error) {
+        console.error('Ошибка при проверке задачи:', error);
       }
     });
   };
 
-  // Добавляем проверку задач каждую минуту
+  // Обновляем интервал проверки задач
   useEffect(() => {
-    const intervalId = setInterval(checkUpcomingTasks, 60000);
+    const intervalId = setInterval(() => {
+      if (tasks.length > 0) {
+        console.log('Запуск проверки задач по таймеру');
+        checkUpcomingTasks();
+      }
+    }, 15000); // Проверка каждые 15 секунд для большей точности
+    
+    // Запускаем проверку сразу при монтировании компонента
+    if (tasks.length > 0) {
+      console.log('Первоначальная проверка задач');
+      checkUpcomingTasks();
+    }
+    
     return () => clearInterval(intervalId);
-  }, [tasks]);
+  }, [tasks]); // Добавляем tasks в зависимости
 
   // Добавляем WebSocket соединение
   useEffect(() => {
-    const token = localStorage.getItem('token');
-    if (!token) return;
-
-    let ws = null;
-    let reconnectAttempts = 0;
-    const maxReconnectAttempts = 5;
-    const reconnectDelay = 3000; // 3 секунды
-
     const connectWebSocket = () => {
-      try {
-        console.log('Попытка установить WebSocket соединение');
-        ws = new WebSocket(`ws://localhost:3001?token=${token}`);
+      const token = localStorage.getItem('token');
+      const socket = new WebSocket(`ws://localhost:3001/ws?token=${token}`);
 
-        ws.onopen = () => {
-          console.log('WebSocket соединение установлено');
-          reconnectAttempts = 0; // Сбрасываем счетчик попыток при успешном подключении
-        };
+      socket.onopen = () => {
+        console.log('WebSocket соединение установлено');
+        setWs(socket);
+      };
 
-        ws.onmessage = (event) => {
-          try {
-            console.log('Получено WebSocket сообщение:', event.data);
-            const notification = JSON.parse(event.data);
-            
-            if (notification.type === 'task_reminder') {
-              console.log('Отправляем уведомление:', notification);
-              sendNotification(notification.title, notification.body);
-            } else if (notification.type === 'connection_established') {
-              console.log('Подтверждение подключения получено:', notification.message);
-            }
-          } catch (error) {
-            console.error('Ошибка при обработке сообщения:', error);
+      socket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          console.log('Получено WebSocket сообщение:', data);
+
+          if (data.type === 'task_status_changed') {
+            // Обновляем статус задачи
+            setTasks(prevTasks => 
+              prevTasks.map(task => 
+                task.id === data.taskId 
+                  ? { ...task, status: data.newStatus }
+                  : task
+              )
+            );
+
+            // Показываем уведомление
+            const notification = {
+              id: Date.now(),
+              type: 'status_change',
+              message: `Статус задачи изменен на: ${data.newStatus}`,
+              timestamp: data.timestamp || new Date().toISOString()
+            };
+            setNotifications(prev => [notification, ...prev]);
           }
-        };
+        } catch (error) {
+          console.error('Ошибка при обработке WebSocket сообщения:', error);
+        }
+      };
 
-        ws.onerror = (error) => {
-          console.error('WebSocket ошибка:', error);
-          setError('Ошибка соединения с сервером уведомлений');
-        };
+      socket.onerror = (error) => {
+        console.error('WebSocket ошибка:', error);
+      };
 
-        ws.onclose = (event) => {
-          console.log('WebSocket соединение закрыто:', event.code, event.reason);
-          
-          // Пытаемся переподключиться, если это не было намеренное закрытие
-          if (event.code !== 1000 && reconnectAttempts < maxReconnectAttempts) {
-            reconnectAttempts++;
-            console.log(`Попытка переподключения ${reconnectAttempts} из ${maxReconnectAttempts}`);
-            setTimeout(connectWebSocket, reconnectDelay);
-          } else if (reconnectAttempts >= maxReconnectAttempts) {
-            console.log('Достигнуто максимальное количество попыток переподключения');
-            setError('Не удалось установить соединение с сервером уведомлений');
-          }
-        };
-      } catch (error) {
-        console.error('Ошибка при создании WebSocket:', error);
-        setError('Ошибка при создании соединения с сервером уведомлений');
-      }
+      socket.onclose = (event) => {
+        console.log('WebSocket соединение закрыто:', event.code);
+        setWs(null);
+        
+        // Пытаемся переподключиться
+        setTimeout(connectWebSocket, 3000);
+      };
+
+      return socket;
     };
 
-    connectWebSocket();
+    const socket = connectWebSocket();
 
     return () => {
-      if (ws) {
-        ws.close(1000, 'Компонент размонтирован');
+      if (socket) {
+        socket.close(1000, 'Компонент размонтирован');
       }
     };
   }, []);
 
-  // Обновляем функцию отправки уведомлений
+  // Функция для отправки браузерных уведомлений
+  // @param {string} title - Заголовок уведомления
+  // @param {string} body - Текст уведомления
+  // @returns {Promise<void>}
   const sendNotification = async (title, body) => {
     try {
       console.log('Запрашиваем разрешение на уведомления');
+      // Запрашиваем разрешение на отправку уведомлений у пользователя
+      // Возможные значения: 'granted', 'denied', 'default'
       const permission = await Notification.requestPermission();
       console.log('Статус разрешения:', permission);
       
       if (permission === 'granted') {
         console.log('Отправляем уведомление:', { title, body });
+        // Создаем новое уведомление с указанными параметрами
         const notification = new Notification(title, {
-          body,
-          icon: '/favicon.ico',
-          badge: '/favicon.ico',
-          requireInteraction: true,
-          vibrate: [200, 100, 200],
-          silent: false,
-          tag: 'task-notification'
+          body,                    // Текст уведомления
+          icon: '/favicon.ico',    // Иконка уведомления
+          badge: '/favicon.ico',   // Иконка в панели уведомлений
+          requireInteraction: true, // Уведомление не исчезнет автоматически
+          vibrate: [200, 100, 200], // Паттерн вибрации (для мобильных устройств)
+          silent: false,           // Проигрывать звук
+          tag: 'task-notification' // Уникальный тег для группировки уведомлений
         });
 
+        // Обработчик клика по уведомлению
         notification.onclick = () => {
-          window.focus();
-          notification.close();
+          window.focus();          // Фокусируем окно приложения
+          notification.close();    // Закрываем уведомление
         };
       } else {
         console.log('Разрешение на уведомления не получено');
@@ -313,11 +404,21 @@ export function DependentView() {
           timestamp: new Date().toISOString()
         };
         await savePendingChange(pendingChange);
+        setPendingChanges(prev => [...prev, pendingChange]);
+        
+        // Обновляем локальное состояние
+        setTasks(prevTasks => 
+          prevTasks.map(task => 
+            task.id === taskId 
+              ? { ...task, status: newStatus }
+              : task
+          )
+        );
         return;
       }
 
       const token = localStorage.getItem('token');
-      const response = await fetch(`${API_URL}/api/tasks/${taskId}`, {
+      const response = await fetch(`${API_URL}/api/tasks/${taskId}/status`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -325,64 +426,74 @@ export function DependentView() {
         },
         body: JSON.stringify({
           status: newStatus,
-          lastUpdated: task.last_updated
+          lastUpdated: new Date().toISOString()
         })
       });
 
-      if (response.status === 409) {
-        // Конфликт версий
-        const conflictData = await response.json();
-        const shouldOverride = window.confirm(
-          `Задача была изменена другим пользователем. Текущий статус: ${conflictData.currentStatus}. Хотите применить ваше изменение?`
-        );
+      if (!response.ok) {
+        if (response.status === 409) {
+          // Конфликт версий
+          const conflictData = await response.json();
+          const shouldOverride = window.confirm(
+            `Задача была изменена другим пользователем. Текущий статус: ${conflictData.currentStatus}. Хотите применить ваше изменение?`
+          );
 
-        if (shouldOverride) {
-          // Повторяем запрос с принудительным обновлением
-          const retryResponse = await fetch(`${API_URL}/api/tasks/${taskId}`, {
-            method: 'PATCH',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${token}`
-            },
-            body: JSON.stringify({
-              status: newStatus,
-              force: true
-            })
-          });
+          if (shouldOverride) {
+            // Повторяем запрос с принудительным обновлением
+            const retryResponse = await fetch(`${API_URL}/api/tasks/${taskId}/status`, {
+              method: 'PATCH',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`
+              },
+              body: JSON.stringify({
+                status: newStatus,
+                force: true
+              })
+            });
 
-          if (!retryResponse.ok) {
-            throw new Error('Ошибка при обновлении статуса');
+            if (!retryResponse.ok) {
+              throw new Error('Ошибка при обновлении статуса');
+            }
+
+            const updatedTask = await retryResponse.json();
+            setTasks(prevTasks => 
+              prevTasks.map(task => 
+                task.id === taskId 
+                  ? { ...task, status: newStatus, last_updated: updatedTask.lastUpdated }
+                  : task
+              )
+            );
           }
         } else {
-          // Обновляем локальное состояние в соответствии с серверной версией
-          setTasks(prevTasks => 
-            prevTasks.map(task => 
-              task.id === taskId 
-                ? { ...task, status: conflictData.currentStatus, last_updated: conflictData.currentVersion }
-                : task
-            )
-          );
+          throw new Error('Ошибка при обновлении статуса');
         }
-      } else if (!response.ok) {
-        throw new Error('Ошибка при обновлении статуса');
+      } else {
+        const updatedTask = await response.json();
+        setTasks(prevTasks => 
+          prevTasks.map(task => 
+            task.id === taskId 
+              ? { ...task, status: newStatus, last_updated: updatedTask.lastUpdated }
+              : task
+          )
+        );
+
+        // Отправляем уведомление через WebSocket
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          const notification = {
+            type: 'status_update',
+            taskId: taskId,
+            status: newStatus,
+            taskTitle: updatedTask.title,
+            taskDescription: updatedTask.description,
+            timestamp: new Date().toISOString()
+          };
+          ws.send(JSON.stringify(notification));
+        }
       }
-
-      const updatedTask = await response.json();
-      setTasks(prevTasks => 
-        prevTasks.map(task => 
-          task.id === taskId 
-            ? { ...task, status: newStatus, last_updated: updatedTask.lastUpdated }
-            : task
-        )
-      );
-
     } catch (error) {
       console.error('Ошибка при обновлении статуса:', error);
-      // Показываем уведомление об ошибке
-      sendNotification(
-        'Ошибка обновления',
-        'Не удалось обновить статус задачи. Попробуйте позже.'
-      );
+      setError(error.message);
     }
   };
 
@@ -422,20 +533,52 @@ export function DependentView() {
       // Отправляем все локальные изменения на сервер
       for (const change of pendingChanges) {
         try {
-          if (change.type === 'update_status') {
+          if (change.type === 'status_update') {
             console.log('Синхронизация изменения статуса:', change);
-            const response = await fetch(`${API_URL}/api/tasks/${change.taskId}`, {
+            const response = await fetch(`${API_URL}/api/tasks/${change.taskId}/status`, {
               method: 'PATCH',
               headers: {
                 'Authorization': `Bearer ${token}`,
                 'Content-Type': 'application/json'
               },
-              body: JSON.stringify({ status: change.newStatus })
+              body: JSON.stringify({ 
+                status: change.status,
+                lastUpdated: change.timestamp
+              })
             });
 
             if (!response.ok) {
-              throw new Error('Ошибка синхронизации');
+              if (response.status === 409) {
+                // Если есть конфликт версий, используем локальную версию
+                const retryResponse = await fetch(`${API_URL}/api/tasks/${change.taskId}/status`, {
+                  method: 'PATCH',
+                  headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json'
+                  },
+                  body: JSON.stringify({ 
+                    status: change.status,
+                    force: true
+                  })
+                });
+
+                if (!retryResponse.ok) {
+                  throw new Error('Ошибка синхронизации при конфликте');
+                }
+              } else {
+                throw new Error('Ошибка синхронизации');
+              }
             }
+
+            // Обновляем локальное состояние после успешной синхронизации
+            const updatedTask = await response.json();
+            setTasks(prevTasks => 
+              prevTasks.map(task => 
+                task.id === change.taskId 
+                  ? { ...task, status: change.status, last_updated: updatedTask.lastUpdated }
+                  : task
+              )
+            );
           }
         } catch (error) {
           console.error('Ошибка при синхронизации:', error);
@@ -532,271 +675,290 @@ export function DependentView() {
   }
 
   return (
-    <main style={{ maxWidth: '800px', margin: '0 auto', padding: '20px' }}>
-      <header>
-      </header>
-
-      <section style={{ 
-        display: 'flex', 
-        justifyContent: 'space-between', 
-        alignItems: 'center', 
-        marginBottom: '2rem',
-        backgroundColor: '#ffffff',
-        padding: '20px',
-        borderRadius: '12px'
-      }}>
-        <h2>Добро пожаловать, {userName}!</h2>
-      </section>
-
-      <div aria-live="polite" aria-atomic="true">
+    <div style={{ 
+      width: '100%',
+      boxSizing: 'border-box'
+    }}>
+      <main>
         {error && (
-          <div role="alert" className="alert alert-error">
+          <div role="alert" style={{ 
+            backgroundColor: '#fee2e2',
+            color: '#dc2626',
+            padding: '12px',
+            borderRadius: '8px',
+            marginBottom: '1rem',
+            fontSize: '14px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px'
+          }}>
+            <span>⚠️</span>
             {error}
           </div>
         )}
-      </div>
 
-      <section style={{ 
-        backgroundColor: '#e3f2fd',
-        padding: '15px',
-        borderRadius: '8px',
-        marginBottom: '20px',
-        border: '1px solid #bbdefb'
-      }}>
-        <h3 style={{ 
-          margin: '0 0 10px 0',
-          color: '#0d47a1',
-          fontSize: '16px',
-          fontWeight: '600'
-        }}>
-          Покажите этот код для подключения к опекуну
-        </h3>
-        <div 
-          role="button"
-          tabIndex="0"
-          onKeyPress={(e) => handleKeyPress(e, () => {})}
-          style={{ 
-            backgroundColor: '#ffffff',
-            padding: '20px',
+        {wsError && (
+          <div role="alert" style={{ 
+            backgroundColor: '#fff3cd', 
+            color: '#856404',
+            padding: '8px',
             borderRadius: '8px',
-            border: '1px solid #bbdefb',
-            fontSize: '32px',
-            fontWeight: '600',
-            color: '#0d47a1',
-            textAlign: 'center',
-            letterSpacing: '3px',
-            minHeight: '48px',
-            minWidth: '48px',
-            cursor: 'pointer'
-          }}
-        >
-          {userCode || 'Загрузка...'}
-        </div>
-      </section>
-
-      {!isOnline && (
-        <div role="alert" style={{ 
-          backgroundColor: '#fff3cd', 
-          color: '#856404',
-          padding: '10px',
-          borderRadius: '4px',
-          marginBottom: '1rem',
-          textAlign: 'center'
-        }}>
-          Работа в офлайн-режиме. Изменения будут синхронизированы при восстановлении соединения.
-        </div>
-      )}
-
-      {pendingChanges.length > 0 && (
-        <div role="alert" style={{ 
-          backgroundColor: '#d4edda', 
-          color: '#155724',
-          padding: '10px',
-          borderRadius: '4px',
-          marginBottom: '1rem',
-          textAlign: 'center'
-        }}>
-          Ожидает синхронизации: {pendingChanges.length} изменений
-        </div>
-      )}
-
-      <section style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-        {tasks.length > 0 ? (
-          <ul role="list" aria-label="Список задач" style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-            {tasks.map(task => (
-              <li key={task.id} role="listitem" style={{ margin: 0, padding: 0 }}>
-                <div
-                  style={{
-                    padding: '20px',
-                    backgroundColor: isTaskUpcoming(task) ? '#fff3cd' : '#ffffff',
-                    border: '1px solid #e0e0e0',
-                    borderRadius: '12px',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '15px',
-                    boxShadow: '0 2px 4px rgba(0,0,0,0.05)',
-                    transition: 'transform 0.2s, box-shadow 0.2s',
-                    ':hover': {
-                      transform: 'translateY(-2px)',
-                      boxShadow: '0 4px 8px rgba(0,0,0,0.1)'
-                    }
-                  }}
-                >
-                  <div style={{ 
-                    display: 'flex', 
-                    justifyContent: 'space-between', 
-                    alignItems: 'flex-start',
-                    gap: '15px'
-                  }}>
-                    <div style={{ flex: 1 }}>
-                      <h4 style={{ 
-                        margin: '0 0 10px 0',
-                        fontSize: '32px',
-                        color: '#2c3e50',
-                        fontWeight: '600',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '16px'
-                      }}>
-                        {isTaskUpcoming(task) ? (
-                          <FaExclamationCircle style={{ fontSize: '32px', color: '#ffc107' }} />
-                        ) : (
-                          <FaBell style={{ fontSize: '32px' }} />
-                        )}
-                        {task.title}
-                      </h4>
-                      
-                      {task.description && (
-                        <div style={{ 
-                          margin: '0 0 15px 0',
-                          color: '#666',
-                          fontSize: '14px',
-                          lineHeight: '1.6',
-                          backgroundColor: '#f8f9fa',
-                          padding: '12px',
-                          borderRadius: '8px',
-                          border: '1px solid #e9ecef',
-                          display: 'flex',
-                          alignItems: 'flex-start',
-                          gap: '8px'
-                        }}>
-                          <MdDescription style={{ flexShrink: 0, marginTop: '3px' }} />
-                          <span>{task.description}</span>
-                        </div>
-                      )}
-
-                      <div style={{ 
-                        display: 'flex',
-                        flexWrap: 'wrap',
-                        gap: '12px',
-                        marginBottom: '15px'
-                      }}>
-                        {task.date && (
-                          <div style={{ 
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '8px',
-                            color: '#666',
-                            fontSize: '14px',
-                            backgroundColor: '#e3f2fd',
-                            padding: '8px 12px',
-                            borderRadius: '8px',
-                            border: '1px solid #bbdefb'
-                          }}>
-                            <MdDateRange />
-                            {new Date(task.date).toLocaleDateString('ru-RU', {
-                              day: 'numeric',
-                              month: 'long',
-                              year: 'numeric'
-                            })}
-                          </div>
-                        )}
-                        
-                        {task.time && (
-                          <div style={{ 
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '8px',
-                            color: '#666',
-                            fontSize: '14px',
-                            backgroundColor: '#e3f2fd',
-                            padding: '8px 12px',
-                            borderRadius: '8px',
-                            border: '1px solid #bbdefb'
-                          }}>
-                            <MdAccessTime />
-                            {task.time}
-                          </div>
-                        )}
-
-                        <div style={{ 
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '8px',
-                          color: task.status === 'completed' ? '#155724' : 
-                                 task.status === 'in_progress' ? '#856404' : '#1a237e',
-                          fontSize: '14px',
-                          backgroundColor: task.status === 'completed' ? '#d4edda' : 
-                                         task.status === 'in_progress' ? '#fff3cd' : '#e8eaf6',
-                          padding: '8px 12px',
-                          borderRadius: '8px',
-                          border: '1px solid ' + (task.status === 'completed' ? '#c3e6cb' : 
-                                                task.status === 'in_progress' ? '#ffeeba' : '#c5cae9')
-                        }}>
-                          {task.status === 'completed' ? <FaCheck /> : 
-                           task.status === 'in_progress' ? <MdPending /> : <MdPending />}
-                          {task.status === 'completed' ? 'Выполнено' : 
-                           task.status === 'in_progress' ? 'В процессе' : 'В ожидании'}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div style={{ display: 'flex', gap: '8px' }}>
-                      <button
-                        onClick={() => {
-                          const newStatus = task.status === 'completed' ? 'pending' : 'completed';
-                          handleStatusChange(task.id, newStatus);
-                        }}
-                        onKeyPress={(e) => handleKeyPress(e, () => handleStatusChange(task.id, newStatus))}
-                        style={{
-                          padding: '16px',
-                          backgroundColor: task.status === 'completed' ? '#dc3545' : '#6c5ce7',
-                          color: 'white',
-                          border: 'none',
-                          borderRadius: '12px',
-                          cursor: 'pointer',
-                          fontSize: '20px',
-                          fontWeight: '500',
-                          transition: 'all 0.2s',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          width: '64px',
-                          height: '64px'
-                        }}
-                        title={task.status === 'completed' ? 'Отменить' : 'Завершить'}
-                      >
-                        {task.status === 'completed' ? <FaTimes style={{ fontSize: '28px' }} /> : <FaCheck style={{ fontSize: '28px' }} />}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <div style={{ 
-            textAlign: 'center', 
-            color: '#6c757d',
-            padding: '30px',
-            backgroundColor: '#f8f9fa',
-            borderRadius: '12px',
-            border: '1px solid #e9ecef'
+            marginBottom: '1rem',
+            fontSize: '12px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            opacity: 0.8
           }}>
-            <p style={{ margin: 0, fontSize: '16px' }}>Нет активных задач</p>
+            <span>ℹ️</span>
+            {wsError}
           </div>
         )}
-      </section>
-    </main>
+
+        <h1 style={{ margin: '0 0 20px 0' }}>Панель подопечного</h1>
+
+        <section style={{ 
+          backgroundColor: '#e3f2fd',
+          padding: '15px',
+          borderRadius: '8px',
+          marginBottom: '20px',
+          border: '1px solid #bbdefb'
+        }}>
+          <h2 style={{ 
+            margin: '0 0 10px 0',
+            color: '#0d47a1',
+            fontSize: '16px',
+            fontWeight: '600'
+          }}>
+            Покажите этот код для подключения к опекуну
+          </h2>
+          <div 
+            role="button"
+            tabIndex="0"
+            onKeyPress={(e) => handleKeyPress(e, () => {})}
+            style={{ 
+              backgroundColor: '#ffffff',
+              padding: '20px',
+              borderRadius: '8px',
+              border: '1px solid #bbdefb',
+              fontSize: '32px',
+              fontWeight: '600',
+              color: '#0d47a1',
+              textAlign: 'center',
+              letterSpacing: '3px',
+              minHeight: '48px',
+              minWidth: '48px',
+              cursor: 'pointer'
+            }}
+          >
+            {userCode || 'Загрузка...'}
+          </div>
+        </section>
+
+        {!isOnline && (
+          <div role="alert" style={{ 
+            backgroundColor: '#fff3cd', 
+            color: '#856404',
+            padding: '10px',
+            borderRadius: '4px',
+            marginBottom: '1rem',
+            textAlign: 'center'
+          }}>
+            Работа в офлайн-режиме. Изменения будут синхронизированы при восстановлении соединения.
+          </div>
+        )}
+
+        {pendingChanges.length > 0 && (
+          <div role="alert" style={{ 
+            backgroundColor: '#d4edda', 
+            color: '#155724',
+            padding: '10px',
+            borderRadius: '4px',
+            marginBottom: '1rem',
+            textAlign: 'center'
+          }}>
+            Ожидает синхронизации: {pendingChanges.length} изменений
+          </div>
+        )}
+
+        <section style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          {tasks.length > 0 ? (
+            <ul role="list" aria-label="Список задач" style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+              {tasks.map(task => (
+                <li key={task.id} role="listitem" style={{ margin: 0, padding: 0 }}>
+                  <div
+                    style={{
+                      padding: '20px',
+                      backgroundColor: isTaskUpcoming(task) ? '#fff3cd' : '#ffffff',
+                      border: '1px solid #e0e0e0',
+                      borderRadius: '12px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '15px',
+                      boxShadow: '0 2px 4px rgba(0,0,0,0.05)',
+                      transition: 'transform 0.2s, box-shadow 0.2s',
+                      ':hover': {
+                        transform: 'translateY(-2px)',
+                        boxShadow: '0 4px 8px rgba(0,0,0,0.1)'
+                      }
+                    }}
+                  >
+                    <div style={{ 
+                      display: 'flex', 
+                      justifyContent: 'space-between', 
+                      alignItems: 'flex-start',
+                      gap: '15px'
+                    }}>
+                      <div style={{ flex: 1 }}>
+                        <h3 style={{ 
+                          margin: '0 0 10px 0',
+                          fontSize: '32px',
+                          color: '#2c3e50',
+                          fontWeight: '600',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '16px'
+                        }}>
+                          {isTaskUpcoming(task) ? (
+                            <FaExclamationCircle style={{ fontSize: '32px', color: '#ffc107' }} />
+                          ) : (
+                            <FaBell style={{ fontSize: '32px' }} />
+                          )}
+                          {task.title}
+                        </h3>
+                        
+                        {task.description && (
+                          <div style={{ 
+                            margin: '0 0 15px 0',
+                            color: '#666',
+                            fontSize: '14px',
+                            lineHeight: '1.6',
+                            backgroundColor: '#f8f9fa',
+                            padding: '12px',
+                            borderRadius: '8px',
+                            border: '1px solid #e9ecef',
+                            display: 'flex',
+                            alignItems: 'flex-start',
+                            gap: '8px'
+                          }}>
+                            <MdDescription style={{ flexShrink: 0, marginTop: '3px' }} />
+                            <span>{task.description}</span>
+                          </div>
+                        )}
+
+                        <div style={{ 
+                          display: 'flex', 
+                          flexWrap: 'wrap',
+                          gap: '12px',
+                          marginBottom: '15px'
+                        }}>
+                          {task.date && (
+                            <div style={{ 
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '8px',
+                              color: '#666',
+                              fontSize: '14px',
+                              backgroundColor: '#e3f2fd',
+                              padding: '8px 12px',
+                              borderRadius: '8px',
+                              border: '1px solid #bbdefb'
+                            }}>
+                              <MdDateRange />
+                              {new Date(task.date).toLocaleDateString('ru-RU', {
+                                day: 'numeric',
+                                month: 'long',
+                                year: 'numeric'
+                              })}
+                            </div>
+                          )}
+                          
+                          {task.time && (
+                            <div style={{ 
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '8px',
+                              color: '#666',
+                              fontSize: '14px',
+                              backgroundColor: '#e3f2fd',
+                              padding: '8px 12px',
+                              borderRadius: '8px',
+                              border: '1px solid #bbdefb'
+                            }}>
+                              <MdAccessTime />
+                              {task.time}
+                            </div>
+                          )}
+
+                          <div style={{ 
+                            display: 'flex', 
+                            alignItems: 'center', 
+                            gap: '8px',
+                            color: task.status === 'completed' ? '#155724' : 
+                                   task.status === 'in_progress' ? '#856404' : '#1a237e',
+                            fontSize: '14px',
+                            backgroundColor: task.status === 'completed' ? '#d4edda' : 
+                                           task.status === 'in_progress' ? '#fff3cd' : '#e8eaf6',
+                            padding: '8px 12px',
+                            borderRadius: '8px',
+                            border: '1px solid ' + (task.status === 'completed' ? '#c3e6cb' : 
+                                                  task.status === 'in_progress' ? '#ffeeba' : '#c5cae9')
+                          }}>
+                            {task.status === 'completed' ? <FaCheck /> : 
+                             task.status === 'in_progress' ? <MdPending /> : <MdPending />}
+                            {task.status === 'completed' ? 'Выполнено' : 
+                             task.status === 'in_progress' ? 'В процессе' : 'В ожидании'}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div style={{ display: 'flex', gap: '8px' }}>
+                        <button
+                          onClick={() => {
+                            const newStatus = task.status === 'completed' ? 'pending' : 'completed';
+                            handleStatusChange(task.id, newStatus);
+                          }}
+                          onKeyPress={(e) => handleKeyPress(e, () => handleStatusChange(task.id, newStatus))}
+                          style={{
+                            padding: '16px',
+                            backgroundColor: task.status === 'completed' ? '#dc3545' : '#6c5ce7',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '12px',
+                            cursor: 'pointer',
+                            fontSize: '20px',
+                            fontWeight: '500',
+                            transition: 'all 0.2s',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            width: '64px',
+                            height: '64px'
+                          }}
+                          title={task.status === 'completed' ? 'Отменить' : 'Завершить'}
+                        >
+                          {task.status === 'completed' ? <FaTimes style={{ fontSize: '28px' }} /> : <FaCheck style={{ fontSize: '28px' }} />}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div style={{ 
+              textAlign: 'center',
+              color: '#6c757d',
+              padding: '30px',
+              backgroundColor: '#f8f9fa',
+              borderRadius: '12px',
+              border: '1px solid #e9ecef'
+            }}>
+              <p style={{ margin: 0, fontSize: '16px' }}>Нет активных задач</p>
+            </div>
+          )}
+        </section>
+      </main>
+    </div>
   );
 }
